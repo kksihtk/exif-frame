@@ -33,6 +33,23 @@ const ASPECT_RATIOS = [
   { value: "21:9", labelKey: "ratioPanorama", width: 21, height: 9 },
 ];
 
+const FRAME_STYLES = [
+  { value: "ambient", labelKey: "frameStyleAmbient" },
+  { value: "whiteBottom", labelKey: "frameStyleWhiteBottom" },
+];
+
+const CAMERA_BRAND_LOGOS = {
+  canon: "/camera_brands/canon.png",
+  fujifilm: "/camera_brands/fujifilm.png",
+  nikon: "/camera_brands/nikon.png",
+  panasonic: "/camera_brands/panasonic.png",
+  sony: "/camera_brands/sony.png",
+};
+
+const CAMERA_BRAND_LOGO_SCALE = {
+  nikon: 1.55,
+};
+
 const LANGUAGES = [
   { value: "en", label: "English" },
   { value: "ru", label: "Русский" },
@@ -65,6 +82,9 @@ const TRANSLATIONS = {
     show: "Show",
     hide: "Hide",
     format: "Format",
+    frameStyle: "Frame style",
+    frameStyleAmbient: "Ambient dark frame",
+    frameStyleWhiteBottom: "OneLine",
     customRatio: "Custom ratio",
     width: "Width",
     height: "Height",
@@ -154,6 +174,9 @@ const TRANSLATIONS = {
     show: "Показать",
     hide: "Скрыть",
     format: "Формат",
+    frameStyle: "Стиль рамки",
+    frameStyleAmbient: "Темная рамка",
+    frameStyleWhiteBottom: "OneLine",
     customRatio: "Свой формат",
     width: "Ширина",
     height: "Высота",
@@ -243,6 +266,9 @@ const TRANSLATIONS = {
     show: "Mostrar",
     hide: "Ocultar",
     format: "Formato",
+    frameStyle: "Estilo da moldura",
+    frameStyleAmbient: "Moldura escura",
+    frameStyleWhiteBottom: "OneLine",
     customRatio: "Proporcao personalizada",
     width: "Largura",
     height: "Altura",
@@ -328,6 +354,7 @@ const createDefaultSettings = () => ({
   ratio: "1:1",
   customRatioW: 4,
   customRatioH: 5,
+  frameStyle: "ambient",
   captionOrientation: "horizontal",
   cropZoom: 1,
   cropX: 0,
@@ -458,6 +485,21 @@ function normalizeMake(make) {
   return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
 }
 
+function normalizeBrandToken(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function getCameraBrandKey(make) {
+  const token = normalizeBrandToken(make);
+  if (!token) return "";
+  if (token.includes("canon")) return "canon";
+  if (token.includes("fujifilm") || token.includes("fuji")) return "fujifilm";
+  if (token.includes("nikon")) return "nikon";
+  if (token.includes("panasonic") || token.includes("lumix")) return "panasonic";
+  if (token.includes("sony")) return "sony";
+  return CAMERA_BRAND_LOGOS[token] ? token : "";
+}
+
 function cleanModel(make, model) {
   const rawModel = String(model || "").trim();
   const rawMake = String(make || "").trim();
@@ -471,6 +513,7 @@ function getDisplay(exif) {
   const model = cleanModel(exif.Make, exif.Model);
   return {
     make,
+    brandKey: getCameraBrandKey(exif.Make),
     model,
     lens: String(exif.LensModel || "").trim(),
     focal: formatFocal(exif.FocalLength),
@@ -528,8 +571,9 @@ function getFrameLayout(settings) {
   const canvasW = settings.outputSize;
   const canvasH = Math.round((settings.outputSize * rh) / rw);
   const scale = canvasW / 1600;
-  const hasVerticalCaption = settings.captionOrientation === "vertical";
-  const padding = settings.framePadding * scale;
+  const isWhiteBottom = (settings.frameStyle || "ambient") === "whiteBottom";
+  const hasVerticalCaption = !isWhiteBottom && settings.captionOrientation === "vertical";
+  const padding = isWhiteBottom ? 0 : settings.framePadding * scale;
   const captionArea = settings.bottomArea * scale;
   const photoX = padding;
   const photoY = padding;
@@ -540,6 +584,7 @@ function getFrameLayout(settings) {
     canvasW,
     canvasH,
     scale,
+    isWhiteBottom,
     hasVerticalCaption,
     captionArea,
     photoX,
@@ -600,7 +645,84 @@ function drawFittedCenterText(ctx, text, x, y, maxWidth) {
   ctx.fillText(`${fitted}...`, x, y);
 }
 
-function drawTextBlock(ctx, { make, model, lens, focal, aperture, shutter, iso }, canvasW, y, options) {
+function drawFittedLeftText(ctx, text, x, y, maxWidth) {
+  if (!text || maxWidth <= 0) return;
+  if (ctx.measureText(text).width <= maxWidth) {
+    ctx.fillText(text, x, y);
+    return;
+  }
+
+  let fitted = text;
+  while (fitted.length > 1 && ctx.measureText(`${fitted}...`).width > maxWidth) {
+    fitted = fitted.slice(0, -1);
+  }
+  ctx.fillText(`${fitted}...`, x, y);
+}
+
+function drawFittedRightText(ctx, text, x, y, maxWidth) {
+  if (!text || maxWidth <= 0) return;
+  if (ctx.measureText(text).width <= maxWidth) {
+    ctx.fillText(text, x, y);
+    return;
+  }
+
+  let fitted = text;
+  while (fitted.length > 1 && ctx.measureText(`...${fitted}`).width > maxWidth) {
+    fitted = fitted.slice(1);
+  }
+  ctx.fillText(`...${fitted}`, x, y);
+}
+
+const cameraLogoCache = new Map();
+
+function getCameraLogo(brandKey) {
+  const src = CAMERA_BRAND_LOGOS[brandKey];
+  if (!src) return null;
+  const cached = cameraLogoCache.get(brandKey);
+  if (cached) return cached;
+
+  const image = new Image();
+  const entry = {
+    image,
+    loaded: false,
+    promise: new Promise((resolve) => {
+      image.onload = () => {
+        entry.loaded = true;
+        resolve(image);
+      };
+      image.onerror = () => resolve(null);
+    }),
+  };
+
+  image.src = src;
+  cameraLogoCache.set(brandKey, entry);
+  return entry;
+}
+
+async function preloadCameraLogo(make) {
+  const entry = getCameraLogo(getCameraBrandKey(make));
+  if (!entry) return null;
+  return entry.loaded ? entry.image : entry.promise;
+}
+
+function drawCameraBrandLogo(ctx, logo, x, y, maxW, maxH, filter, align = "baseline") {
+  const ratio = logo.naturalWidth / logo.naturalHeight || 1;
+  let w = maxH * ratio;
+  let h = maxH;
+
+  if (w > maxW) {
+    w = maxW;
+    h = w / ratio;
+  }
+
+  ctx.save();
+  if (filter) ctx.filter = filter;
+  ctx.drawImage(logo, x, align === "center" ? y - h / 2 : y - h + 3, w, h);
+  ctx.restore();
+  return { w, h };
+}
+
+function drawTextBlock(ctx, { make, brandKey, model, lens, focal, aperture, shutter, iso }, canvasW, y, options) {
   const scale = options.scale;
   const logoSize = 25 * scale;
   const modelSize = 25 * scale;
@@ -613,14 +735,108 @@ function drawTextBlock(ctx, { make, model, lens, focal, aperture, shutter, iso }
   const metaParts = [focal, aperture, shutter, iso ? `ISO-${iso}` : ""].filter(Boolean);
   const metaText = metaParts.join("   ");
   const lensText = options.showLensInfo && lens ? lens : "";
+  const textColor = options.textColor || "rgba(255,255,255,0.98)";
+  const modelColor = options.modelColor || "rgba(255,255,255,0.95)";
+  const mutedTextColor = options.mutedTextColor || "rgba(255,255,255,0.78)";
+  const logoEntry = getCameraLogo(brandKey);
+  const cameraLogo = logoEntry?.loaded ? logoEntry.image : null;
+
+  if (logoEntry && !logoEntry.loaded && options.onAssetLoad) {
+    logoEntry.promise.then(options.onAssetLoad);
+  }
 
   if (!cameraText && !metaText && !lensText) return;
+
+  if (options.oneLine) {
+    const leftX = 70 * scale;
+    const rightX = canvasW - 70 * scale;
+    const oneLineLogoSize = 35 * scale;
+    const oneLineModelSize = 33 * scale;
+    const oneLineMetaSize = 30 * scale;
+    const centerY = y;
+    const modelBaseline = centerY + oneLineModelSize * 0.35;
+    const metaBaseline = centerY + oneLineMetaSize * 0.35;
+    const settingsText = metaText || lensText;
+
+    ctx.save();
+    ctx.textBaseline = "alphabetic";
+
+    ctx.font = `500 ${oneLineMetaSize}px Arial, sans-serif`;
+    const maxSettingsW = canvasW * 0.43;
+    const settingsW = Math.min(ctx.measureText(settingsText).width, maxSettingsW);
+    const separatorX = rightX - settingsW - 32 * scale;
+
+    if (settingsText) {
+      ctx.strokeStyle = "rgba(18,18,18,0.28)";
+      ctx.lineWidth = Math.max(1, 2 * scale);
+      ctx.beginPath();
+      ctx.moveTo(separatorX, centerY - 25 * scale);
+      ctx.lineTo(separatorX, centerY + 25 * scale);
+      ctx.stroke();
+
+      ctx.fillStyle = textColor;
+      ctx.textAlign = "right";
+      drawFittedRightText(ctx, settingsText, rightX, metaBaseline, maxSettingsW);
+    }
+
+    const cameraMaxW = (settingsText ? separatorX - 28 * scale : rightX) - leftX;
+    ctx.textAlign = "left";
+
+    if (cameraLogo) {
+      const brandLogoScale = CAMERA_BRAND_LOGO_SCALE[brandKey] || 1;
+      const logoMaxH = oneLineLogoSize * 1.05 * brandLogoScale;
+      const logoMaxW = 230 * scale * brandLogoScale;
+      const gap = model ? 18 * scale : 0;
+      const drawnLogo = drawCameraBrandLogo(ctx, cameraLogo, leftX, centerY, logoMaxW, logoMaxH, options.logoFilter, "center");
+
+      if (model) {
+        ctx.font = `500 ${oneLineModelSize}px Arial, sans-serif`;
+        ctx.fillStyle = modelColor;
+        drawFittedLeftText(ctx, model, leftX + drawnLogo.w + gap, modelBaseline, cameraMaxW - drawnLogo.w - gap);
+      }
+    } else {
+      const makeText = make && model ? make : cameraText;
+      const modelText = make && model ? ` ${model}` : "";
+
+      ctx.font = `700 ${oneLineModelSize}px Georgia, Times New Roman, serif`;
+      ctx.fillStyle = make ? options.brandColor : modelColor;
+      const makeW = Math.min(ctx.measureText(makeText).width, cameraMaxW);
+      drawFittedLeftText(ctx, makeText, leftX, modelBaseline, cameraMaxW);
+
+      if (modelText && makeW < cameraMaxW) {
+        ctx.font = `500 ${oneLineModelSize}px Arial, sans-serif`;
+        ctx.fillStyle = modelColor;
+        drawFittedLeftText(ctx, modelText, leftX + makeW, modelBaseline, cameraMaxW - makeW);
+      }
+    }
+
+    ctx.restore();
+    return;
+  }
 
   ctx.save();
   ctx.textBaseline = "alphabetic";
 
   if (cameraText) {
-    if (make && model) {
+    if (cameraLogo) {
+      const brandLogoScale = CAMERA_BRAND_LOGO_SCALE[brandKey] || 1;
+      const logoMaxH = logoSize * 1.05 * brandLogoScale;
+      const logoMaxW = 180 * scale * brandLogoScale;
+      const logoRatio = cameraLogo.naturalWidth / cameraLogo.naturalHeight || 1;
+      const logoW = Math.min(logoMaxW, logoMaxH * logoRatio);
+      const gap = model ? 12 * scale : 0;
+
+      ctx.font = `400 ${modelSize}px Arial, sans-serif`;
+      const modelW = model ? ctx.measureText(model).width : 0;
+      const startX = canvasW / 2 - (logoW + gap + modelW) / 2;
+      const drawnLogo = drawCameraBrandLogo(ctx, cameraLogo, startX, y, logoMaxW, logoMaxH, options.logoFilter);
+
+      if (model) {
+        ctx.fillStyle = modelColor;
+        ctx.textAlign = "left";
+        ctx.fillText(model, startX + drawnLogo.w + gap, y);
+      }
+    } else if (make && model) {
       ctx.font = `700 ${logoSize}px Georgia, Times New Roman, serif`;
       const makeW = ctx.measureText(make).width;
       ctx.font = `400 ${modelSize}px Arial, sans-serif`;
@@ -634,11 +850,11 @@ function drawTextBlock(ctx, { make, model, lens, focal, aperture, shutter, iso }
       ctx.fillText(make, startX, y);
 
       ctx.font = `400 ${modelSize}px Arial, sans-serif`;
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.fillStyle = modelColor;
       ctx.fillText(modelText, startX + makeW, y);
     } else {
       ctx.font = `700 ${logoSize}px Georgia, Times New Roman, serif`;
-      ctx.fillStyle = make ? options.brandColor : "rgba(255,255,255,0.95)";
+      ctx.fillStyle = make ? options.brandColor : modelColor;
       ctx.textAlign = "center";
       drawFittedCenterText(ctx, cameraText, canvasW / 2, y, maxTextWidth);
     }
@@ -646,13 +862,13 @@ function drawTextBlock(ctx, { make, model, lens, focal, aperture, shutter, iso }
 
   ctx.font = `400 ${metaSize}px Arial, sans-serif`;
   ctx.textAlign = "center";
-  ctx.fillStyle = "rgba(255,255,255,0.98)";
+  ctx.fillStyle = textColor;
   const metaY = y + (cameraText ? lineGap : 0);
   drawFittedCenterText(ctx, metaText, canvasW / 2, metaY, maxTextWidth);
 
   if (lensText) {
     ctx.font = `400 ${lensSize}px Arial, sans-serif`;
-    ctx.fillStyle = "rgba(255,255,255,0.78)";
+    ctx.fillStyle = mutedTextColor;
     drawFittedCenterText(ctx, lensText, canvasW / 2, metaY + (metaText ? lensGap : 0), maxTextWidth);
   }
   ctx.restore();
@@ -808,7 +1024,7 @@ function renderFrame(canvas, image, exif, settings, options = {}) {
   if (!canvas || !ctx || !image) return;
 
   const layout = getFrameLayout(settings);
-  const { canvasW, canvasH, scale, hasVerticalCaption, captionArea, photoX, photoY, photoW, photoH } = layout;
+  const { canvasW, canvasH, scale, isWhiteBottom, hasVerticalCaption, captionArea, photoX, photoY, photoW, photoH } = layout;
   canvas.width = canvasW;
   canvas.height = canvasH;
 
@@ -819,9 +1035,14 @@ function renderFrame(canvas, image, exif, settings, options = {}) {
     return;
   }
 
-  drawBlurredBackground(ctx, image, canvasW, canvasH);
+  if (isWhiteBottom) {
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvasW, canvasH);
+  } else {
+    drawBlurredBackground(ctx, image, canvasW, canvasH);
+  }
 
-  const radius = settings.photoRadius * scale;
+  const radius = isWhiteBottom ? 0 : settings.photoRadius * scale;
 
   ctx.save();
   roundRectPath(ctx, photoX, photoY, photoW, photoH, radius);
@@ -831,20 +1052,43 @@ function renderFrame(canvas, image, exif, settings, options = {}) {
   drawWatermarks(ctx, settings.watermarks, photoX, photoY, scale);
   ctx.restore();
 
-  ctx.save();
-  roundRectPath(ctx, photoX, photoY, photoW, photoH, radius);
-  ctx.strokeStyle = "rgba(255,255,255,0.15)";
-  ctx.lineWidth = 1.2 * scale;
-  ctx.stroke();
-  ctx.restore();
+  if (isWhiteBottom) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,0.1)";
+    ctx.lineWidth = Math.max(1, 1.2 * scale);
+    ctx.beginPath();
+    ctx.moveTo(0, photoY + photoH);
+    ctx.lineTo(canvasW, photoY + photoH);
+    ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.save();
+    roundRectPath(ctx, photoX, photoY, photoW, photoH, radius);
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.lineWidth = 1.2 * scale;
+    ctx.stroke();
+    ctx.restore();
+  }
 
   const textOptions = {
     scale,
     brandColor: settings.brandColor,
     showLensInfo: settings.showLensInfo,
+    logoFilter: isWhiteBottom ? "" : "brightness(0) invert(1)",
+    oneLine: isWhiteBottom,
+    onAssetLoad: options.onAssetLoad,
+    ...(isWhiteBottom
+      ? {
+          textColor: "rgba(18,18,18,0.94)",
+          modelColor: "rgba(18,18,18,0.9)",
+          mutedTextColor: "rgba(18,18,18,0.62)",
+        }
+      : {}),
   };
 
-  if (hasVerticalCaption) {
+  if (isWhiteBottom) {
+    drawTextBlock(ctx, getDisplay(exif), canvasW, photoY + photoH + captionArea / 2, textOptions);
+  } else if (hasVerticalCaption) {
     ctx.save();
     ctx.translate(photoX + photoW + captionArea / 2, canvasH / 2);
     ctx.rotate(Math.PI / 2);
@@ -927,6 +1171,7 @@ function getOutputName(photo, index) {
 }
 
 async function renderPhotoToBlob(photo) {
+  await preloadCameraLogo(photo.exif?.Make);
   const canvas = document.createElement("canvas");
   renderFrame(canvas, photo.image, photo.exif, photo.settings);
   return canvasToBlob(canvas);
@@ -943,7 +1188,7 @@ export default function App() {
   const [isImporting, setIsImporting] = useState(false);
   const [savingMode, setSavingMode] = useState("");
   const [isCropping, setIsCropping] = useState(false);
-  const [isCaptionEditing, setIsCaptionEditing] = useState(false);
+  const [captionEditingPhotoId, setCaptionEditingPhotoId] = useState(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLanguageOpen, setIsLanguageOpen] = useState(false);
   const [language, setLanguage] = useState("en");
@@ -965,16 +1210,15 @@ export default function App() {
 
   const render = useCallback(() => {
     if (!activePhoto) return;
-    renderFrame(canvasRef.current, activePhoto.image, activePhoto.exif, activePhoto.settings, { cropPreview: isCropping });
+    renderFrame(canvasRef.current, activePhoto.image, activePhoto.exif, activePhoto.settings, {
+      cropPreview: isCropping,
+      onAssetLoad: () => renderFrame(canvasRef.current, activePhoto.image, activePhoto.exif, activePhoto.settings, { cropPreview: isCropping }),
+    });
   }, [activePhoto, isCropping]);
 
   useEffect(() => {
     render();
   }, [render]);
-
-  useEffect(() => {
-    setIsCaptionEditing(false);
-  }, [activePhoto?.id]);
 
   const handleFiles = async (event) => {
     const selectedFiles = Array.from(event.target.files || []);
@@ -1207,6 +1451,7 @@ export default function App() {
 
   const settings = activePhoto?.settings || emptySettings;
   const hasPhotos = photos.length > 0;
+  const isCaptionEditing = Boolean(activePhoto && captionEditingPhotoId === activePhoto.id);
 
   return (
     <main className="app-shell">
@@ -1302,6 +1547,15 @@ export default function App() {
                   <option key={ratio.value} value={ratio.value}>{t[ratio.labelKey]}</option>
                 ))}
                 <option value="custom">{t.customRatio}</option>
+              </select>
+            </label>
+
+            <label className="field">
+              <span>{t.frameStyle}</span>
+              <select value={settings.frameStyle || "ambient"} disabled={!activePhoto} onChange={(e) => updateSetting("frameStyle", e.target.value)}>
+                {FRAME_STYLES.map((style) => (
+                  <option key={style.value} value={style.value}>{t[style.labelKey]}</option>
+                ))}
               </select>
             </label>
 
@@ -1428,7 +1682,12 @@ export default function App() {
         <section className="exif-summary">
           <div className="section-title">
             <h2>{t.captionData}</h2>
-            <button type="button" className="text-action" disabled={!activePhoto} onClick={() => setIsCaptionEditing((value) => !value)}>
+            <button
+              type="button"
+              className="text-action"
+              disabled={!activePhoto}
+              onClick={() => setCaptionEditingPhotoId((value) => (value === activePhoto?.id ? null : activePhoto?.id))}
+            >
               {isCaptionEditing ? t.done : t.edit}
             </button>
           </div>
